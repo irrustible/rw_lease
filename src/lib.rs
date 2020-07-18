@@ -1,79 +1,105 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
+use atomic_prim_traits::AtomicInt;
+use primitive_traits::*;
 
-pub(crate) const BIT_ON: usize = isize::MIN as usize;
-pub(crate) const BIT_OFF: usize = isize::MAX as usize;
+// #[cfg(feature="event-listener")]
+// mod future;
+// #[cfg(feature="event-listener")]
+// pub use future::*;
 
+/// Can happen when we try to take a read lease.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub enum TryReadError {
-    ReadLocked,
-    WriteLocked,
+pub enum Blocked {
+    /// There are too many readers, try again in a moment.
+    Readers,
+    /// There is a writer. Maybe it won't be just a moment, who knows?
+    Writer,
 }
 
-pub struct WriteLocked();
-
-/// A Reader-Writer lock based on an AtomicUsize
-pub struct RWLease {
-    pub(crate) inner: AtomicUsize,
+/// Like an RWLock, except a writer will deny new read leases when it
+/// wishes to write and will then wait until there are no more
+/// readers. Leases are counted in and out on an atomic integer whose
+/// type may be provided as the optional `A` parameter.
+pub struct RWLease<T, A=AtomicUsize>
+where A: AtomicInt, A::Prim: AddSign {
+    pub(crate) atomic: A,
+    pub(crate) value: T,
 }
 
-impl RWLease {
-    pub fn new() -> RWLease {
-        RWLease { inner: AtomicUsize::new(0) }
+impl<T, A> RWLease<T, A>
+where A: AtomicInt, A::Prim: AddSign {
+
+    pub fn new(value: T) -> RWLease<T, A> {
+        RWLease { atomic: A::default(), value }
     }
+
     #[cfg(test)]
-    pub(crate) fn new_at(what: usize) -> RWLease {
-        RWLease { inner: AtomicUsize::new(what) }
+    pub(crate) fn new_with_state(state: usize, value: T) -> RWLease<T, A> {
+        RWLease { atomic: AtomicInt::new(state), value }
     }
-    /// Attempt to take a read lock, which will fail if there are too many read locks or a writer lock.
-    pub fn try_read(&self) -> Result<ReadGuard, TryReadError> {
+
+    /// Attempt to take a read lease, which will fail if there are too
+    /// many read leases or a writer lease.
+    pub fn try_read(&self) -> Result<ReadGuard<T, A>, Blocked> {
+        let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         loop {
-            let current = self.inner.load(Ordering::SeqCst);
-            if current < BIT_OFF {
-                if self.inner.compare_exchange_weak(current, current+1, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                    return Ok(ReadGuard::new(&self.inner));
+            let current = self.atomic.load(Ordering::SeqCst);
+            let new = current + <A::Prim as Integer>::ONE;
+            if new < mask {
+                if self.atomic.compare_exchange_weak(
+                    current, new, Ordering::SeqCst, Ordering::SeqCst
+                ).is_ok() {
+                    return Ok(ReadGuard::new(&self));
                 }
-            } else if current & BIT_ON != BIT_ON {
-                return Err(TryReadError::ReadLocked)
+            } else if (current & mask) != mask {
+                return Err(Blocked::Readers)
             } else {
-                return Err(TryReadError::WriteLocked)
+                return Err(Blocked::Writer)
             }
         }
     }
-    pub fn try_write<'a>(&'a self) -> Result<Drain<'a>, WriteLocked> {
-        let ret = self.inner.fetch_or(BIT_ON, Ordering::SeqCst);
-        if ret == 0 {
-            Ok(Drain::new(&self.inner, true))
-        } else if ret & BIT_ON != BIT_ON {
-            Ok(Drain::new(&self.inner, false))
+
+    pub fn try_write<'a>(&'a self) -> Result<DrainGuard<'a, T, A>, Blocked> {
+        let mask_on = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+        let ret = self.atomic.fetch_or(mask_on, Ordering::SeqCst);
+        if ret == <A::Prim as Integer>::ZERO {
+            Ok(DrainGuard::new(&self, true))
+        } else if (ret & mask_on) != mask_on {
+            Ok(DrainGuard::new(&self, false))
         } else {
-            Err(WriteLocked())
+            Err(Blocked::Writer)
         }
     }
 }
 
-/// The Drain represents waiting for the readers to release their
-/// locks so we can take a write lock.
-pub struct Drain<'a> {
-    pub(crate) inner: Option<&'a AtomicUsize>,
+/// The DrainGuard represents waiting for the readers to release their
+/// leases so we can take a write lease.
+pub struct DrainGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+    pub(crate) inner: Option<&'a RWLease<T, A>>,
     pub(crate) ready: bool,
 }
 
-impl<'a> Drain<'a> {
-    pub(crate) fn new(inner: &'a AtomicUsize, ready: bool) -> Drain<'a> {
-        Drain { inner: Some(inner), ready }
+impl<'a, T, A> DrainGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+
+    pub(crate) fn new(inner: &'a RWLease<T, A>, ready: bool) -> DrainGuard<'a, T, A> {
+        DrainGuard { inner: Some(inner), ready }
     }
+
     /// Attempts to upgrade to a WriteGuard. If readers are still
     /// locking it, returns self so you can try again
-    pub fn try_upgrade(mut self) -> Result<WriteGuard<'a>, Drain<'a>> {
+    pub fn try_upgrade(mut self) -> Result<WriteGuard<'a, T, A>, DrainGuard<'a, T, A>> {
         if self.ready {
             match self.inner.take() {
-                Some(inner) => Ok(WriteGuard { inner }),
+                Some(inner) => Ok(WriteGuard::new(inner)),
                 _ => Err(self),
             }
         } else {
-            if let Some(atomic) = &self.inner {
-                if atomic.load(Ordering::SeqCst) == BIT_ON {
-                    return Ok(WriteGuard::new(atomic));
+            if let Some(inner) = self.inner {
+                let drained = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+                if inner.atomic.load(Ordering::SeqCst) == drained {
+                    return Ok(WriteGuard::new(inner));
                 }
             }
             Err(self)
@@ -81,34 +107,45 @@ impl<'a> Drain<'a> {
     }
 }
 
-impl<'a> Drop for Drain<'a> {
+impl<'a, T, A> Drop for DrainGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
     fn drop(&mut self) {
-        if let Some(atomic) = self.inner.take() {
-            atomic.fetch_and(BIT_ON, Ordering::SeqCst);
+        if let Some(inner) = self.inner.take() {
+            let mask = !<<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+            inner.atomic.fetch_and(mask, Ordering::SeqCst);
         }
     }
 }
 
 /// This guard signifies read access. When it drops, it will release the read lock.
-pub struct ReadGuard<'a> {
-    pub(crate) inner: Option<&'a AtomicUsize>,
+pub struct ReadGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+    pub(crate) inner: Option<&'a RWLease<T, A>>, 
 }
 
-impl<'a> ReadGuard<'a> {
-    pub(crate) fn new(inner: &'a AtomicUsize) -> ReadGuard<'a> {
+impl<'a, T, A: AtomicInt> ReadGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+    pub(crate) fn new(inner: &'a RWLease<T, A>) -> ReadGuard<'a, T, A> {
         ReadGuard { inner: Some(inner) }
     }
 }
 
-impl<'a> Drop for ReadGuard<'a> {
+impl<'a, T, A> Drop for ReadGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
     fn drop(&mut self) {
-        if let Some(atomic) = self.inner.take() {
+        if let Some(inner) = self.inner.take() {
+            let mask_on = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+            let mask_off = !mask_on;
             loop {
-                let current = atomic.load(Ordering::SeqCst);
-                let masked = current & BIT_OFF;
-                if masked > 0 {
-                    let new = (masked - 1) | (current & BIT_ON);
-                    if atomic.compare_exchange_weak(current, new, Ordering::SeqCst, Ordering::SeqCst).is_ok() { return }
+                let atomic = &inner.atomic;
+                let current: A::Prim = atomic.load(Ordering::SeqCst);
+                let masked = current & mask_off;
+                if masked > <A::Prim as Integer>::ZERO {
+                    let subbed = masked - <A::Prim as Integer>::ONE;
+                    let new = subbed | (current & mask_on);
+                    if atomic.compare_exchange_weak(
+                        current, new, Ordering::SeqCst, Ordering::SeqCst
+                    ).is_ok() { return }
                 } else {
                     panic!("How did you get a zero reader count?");
                 }
@@ -118,54 +155,94 @@ impl<'a> Drop for ReadGuard<'a> {
 }
 
 /// This guard signifies write access. When it drops, it will release the write lock.
-pub struct WriteGuard<'a> {
-    pub(crate) inner: &'a AtomicUsize,
+pub struct WriteGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+    pub(crate) inner: &'a RWLease<T, A>,
 }
 
-impl<'a> WriteGuard<'a> {
-    fn new(inner: &'a AtomicUsize) -> WriteGuard<'a> {
+impl<'a, T, A> WriteGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
+    fn new(inner: &'a RWLease<T, A>) -> WriteGuard<'a, T, A> {
         WriteGuard { inner }
     }
 }
 
-impl<'a> Drop for WriteGuard<'a> {
+impl<'a, T, A> Drop for WriteGuard<'a, T, A>
+where A: AtomicInt, A::Prim: AddSign {
     fn drop(&mut self) {
-        self.inner.fetch_and(BIT_ON, Ordering::SeqCst);
+        let mask = !<<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+        self.inner.atomic.fetch_and(mask, Ordering::SeqCst);
     }
 }
 
-#[cfg(test)]
-mod test {
-    #[test]
-    // In which we verify we know how to steal a bit by abusing our
-    // knowledge of how integers are represented.
-    fn bit_hax() {
-        assert_eq!(i8::MIN as u8, 1 << 7);
-        assert_eq!(i8::MAX as u8, !(1 << 7));
-        assert_eq!(i16::MIN as u16, 1 << 15);
-        assert_eq!(i16::MAX as u16, !(1 << 15));
-        assert_eq!(i32::MIN as u32, 1 << 31);
-        assert_eq!(i32::MAX as u32, !(1 << 31));
-        assert_eq!(i64::MIN as u64, 1 << 63);
-        assert_eq!(i64::MAX as u64, !(1 << 63));
-    }
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//     use prim_traits::*;
 
-    #[test]
-    #[cfg(target_pointer_size="32")]
-    fn constants() {
-        assert_eq!(BIT_ON.leading_ones(), 1);
-        assert_eq!(BIT_ON.trailing_zeroes(), 31);
-        assert_eq!(BIT_OFF.leading_zeroes(), 1);
-        assert_eq!(BIT_OFF.trailing_ones(), 31);
-    }
+//     fn theft_one<T: Integer + Signed>() {
+//         for i in 0..T::WIDTH {
+//             assert_eq!(
+//                 (T::MIN >> i).leading_ones() as usize,
+//                 i+1
+//             );
+//             assert_eq!(
+//                 (T::MIN >> i).trailing_zeros() as usize,
+//                 T::WIDTH - (i as usize + 1)
+//             );
+//         }
+//     }
 
-    #[test]
-    #[cfg(target_pointer_size="64")]
-    fn constants() {
-        assert_eq!(BIT_ON.leading_ones(), 1);
-        assert_eq!(BIT_ON.trailing_zeroes(), 63);
-        assert_eq!(BIT_OFF.leading_zeroes(), 1);
-        assert_eq!(BIT_OFF.trailing_ones(), 63);
-    }
+//     #[test]
+//     fn theft() {
+//         theft_one::<i8>();
+//         theft_one::<i16>();
+//         theft_one::<i32>();
+//         theft_one::<i64>();
+//         theft_one::<i128>();
+//         theft_one::<isize>();
+//     }
 
-}
+// }
+
+// // pub const fn theft_mask<T: ArithmeticShr>(bits: usize) -> T {
+// //     <T as Integer>::MIN.shr::<T>(bits - 1)
+// // }
+
+// #[cfg(test)]
+// mod test {
+//     #[test]
+//     // In which we verify we know how to steal a bit by abusing our
+//     // knowledge of how integers are represented.
+//     fn bit_hax() {
+//         assert_eq!(i8::MIN as u8, 1 << 7);
+//         assert_eq!(i8::MAX as u8, !(1 << 7));
+//         assert_eq!(i16::MIN as u16, 1 << 15);
+//         assert_eq!(i16::MAX as u16, !(1 << 15));
+//         assert_eq!(i32::MIN as u32, 1 << 31);
+//         assert_eq!(i32::MAX as u32, !(1 << 31));
+//         assert_eq!(i64::MIN as u64, 1 << 63);
+//         assert_eq!(i64::MAX as u64, !(1 << 63));
+//         assert_eq!(i128::MIN as u64, 1 << 127);
+//         assert_eq!(i128::MAX as u64, !(1 << 127));
+//     }
+
+//     #[test]
+//     #[cfg(target_pointer_size="32")]
+//     fn constants() {
+//         assert_eq!(BIT_ON.leading_ones(), 1);
+//         assert_eq!(BIT_ON.trailing_zeroes(), 31);
+//         assert_eq!(BIT_OFF.leading_zeroes(), 1);
+//         assert_eq!(BIT_OFF.trailing_ones(), 31);
+//     }
+
+//     #[test]
+//     #[cfg(target_pointer_size="64")]
+//     fn constants() {
+//         assert_eq!(BIT_ON.leading_ones(), 1);
+//         assert_eq!(BIT_ON.trailing_zeroes(), 63);
+//         assert_eq!(BIT_OFF.leading_zeroes(), 1);
+//         assert_eq!(BIT_OFF.trailing_ones(), 63);
+//     }
+
+// }
