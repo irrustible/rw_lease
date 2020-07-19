@@ -10,7 +10,7 @@ mod future;
 pub use future::*;
 
 /// Can happen when we try to take a read lease.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Blocked {
     /// There are too many readers, try again in a moment.
     Readers,
@@ -27,6 +27,7 @@ pub enum Blocked {
 /// * Bring your own synchronisation primitive:
 ///   * No looping
 /// * Writers wait for a lack of readers before assuming Write access.
+#[derive(Debug)]
 pub struct RWLease<T, A=AtomicUsize>
 where A: AtomicInt, A::Prim: AddSign {
     pub(crate) atomic: A,
@@ -113,6 +114,7 @@ where A: AtomicInt, A::Prim: AddSign {
 
 /// The DrainGuard represents waiting for the readers to release their
 /// leases so we can take a write lease.
+#[derive(Debug)]
 pub struct DrainGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
     pub(crate) lease: Option<&'a RWLease<T, A>>,
@@ -152,6 +154,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
 }
 
 /// This guard signifies read access. When it drops, it will release the read lock.
+#[derive(Debug)]
 pub struct ReadGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
     pub(crate) lease: Option<&'a RWLease<T, A>>, 
@@ -182,6 +185,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
 }
 
 /// This guard signifies write access. When it drops, it will release the write lock.
+#[derive(Debug)]
 pub struct WriteGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
     pub(crate) lease: &'a RWLease<T, A>,

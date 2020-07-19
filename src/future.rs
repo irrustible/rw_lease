@@ -13,6 +13,7 @@ const READ_SPINS: usize = 100;
 const WRITE_SPINS: usize = 100;
 
 /// Requires the `event-listener` feature.
+#[derive(Debug)]
 pub struct AsyncRWLease<T, A=AtomicUsize>
 where A: AtomicInt, A::Prim: AddSign {
     pub(crate) lease: RWLease<T,A>,
@@ -65,6 +66,7 @@ where A: AtomicInt, A::Prim: AddSign + Into<usize> {
 
 }
 
+#[derive(Debug)]
 pub struct PollReadGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
     pub(crate) lease: Option<&'a AsyncRWLease<T, A>>,
@@ -118,6 +120,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
     }
 }
 
+#[derive(Debug)]
 pub struct PollWriteGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
     pub(crate) lease: Option<&'a AsyncRWLease<T, A>>,
@@ -186,6 +189,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
 }
 
 /// Requires the `event-listener` feature.
+#[derive(Debug)]
 pub struct AsyncReadGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
     pub(crate) lease: &'a AsyncRWLease<T, A>,
@@ -214,6 +218,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
 }
 
 /// Requires the `event-listener` feature.
+#[derive(Debug)]
 pub struct AsyncWriteGuard<'a, T, A>
 where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
     pub(crate) lease: &'a AsyncRWLease<T, A>,
