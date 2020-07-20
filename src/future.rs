@@ -1,10 +1,10 @@
 use atomic_prim_traits::AtomicInt;
+use atomic_waker::AtomicWaker;
 use event_listener::{Event, EventListener};
 use primitive_traits::*;
-use simple_mutex::Mutex;
 use std::future::Future;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, spin_loop_hint};
 use super::{Blocked, RWLease};
@@ -18,7 +18,7 @@ pub struct AsyncRWLease<T, A=AtomicUsize>
 where A: AtomicInt, A::Prim: AddSign {
     pub(crate) lease: RWLease<T,A>,
     pub(crate) read: Event,
-    pub(crate) write: Mutex<Option<Waker>>, // *cry*
+    pub(crate) write: AtomicWaker,
 }
 
 impl<T, A> AsyncRWLease<T, A>
@@ -28,7 +28,7 @@ where A: AtomicInt, A::Prim: AddSign + Into<usize> {
         AsyncRWLease {
             lease: RWLease::new(value),
             read: Event::new(),
-            write: Mutex::new(None),
+            write: AtomicWaker::new(),
         }
     }
 
@@ -48,11 +48,8 @@ where A: AtomicInt, A::Prim: AddSign + Into<usize> {
         let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         let one = <A::Prim as Integer>::ONE;
         let old = self.lease.done_reading();
-        if old == mask + one { // writing waiting, we're the last reader
-            let mut lock = self.write.lock();
-            if let Some(waker) = lock.take() {
-                waker.wake();
-            }
+        if old == mask + one { // writer waiting, we're the last reader
+            self.write.wake();
         } else if old < mask { // there may be a reader waiting
             self.read.notify_additional(1);
         }
@@ -160,7 +157,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
                     }
                     Err(err) => { // only blocks on other writers
                         if this.wait_on_write {
-                            *lease.write.lock() = Some(ctx.waker().clone());
+                            lease.write.register(ctx.waker());
                             match lease.lease.poll_write_mark() { // race - maybe it just finished?
                                 Ok(false) => { this.marked = true; }
                                 Ok(true) => {
@@ -182,7 +179,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign + Into<usize>, T: 'a {
                     spin_loop_hint();
                 }
             }
-            *lease.write.lock() = Some(ctx.waker().clone());
+            lease.write.register(ctx.waker());
         }
         Poll::Pending // Either we already completed 
     }
