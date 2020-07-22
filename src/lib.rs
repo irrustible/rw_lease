@@ -112,6 +112,9 @@ where A: AtomicInt, A::Prim: AddSign {
 
 }
 
+unsafe impl<T: Send> Send for RWLease<T> {}
+unsafe impl<T: Sync> Sync for RWLease<T> {}
+
 /// The DrainGuard represents waiting for the readers to release their
 /// leases so we can take a write lease.
 #[derive(Debug)]
