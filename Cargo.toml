@@ -1,5 +1,5 @@
 [package]
-name = "rw_lease"
+name = "rw-lease"
 version = "0.1.0"
 authors = ["James Laver <james.laver@gmail.com>"]
 edition = "2018"
