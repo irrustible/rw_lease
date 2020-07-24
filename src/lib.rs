@@ -42,17 +42,17 @@ where A: AtomicInt, A::Prim: AddSign {
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_state(state: usize, value: T) -> RWLease<T, A> {
+    pub(crate) fn new_with_state(state: A::Prim, value: T) -> RWLease<T, A> {
         RWLease { atomic: AtomicInt::new(state), value: UnsafeCell::new(value) }
     }
 
     /// Attempt to take a read lease by CAS or explain why we couldn't.
-    pub fn try_read(&self) -> Result<ReadGuard<T, A>, Blocked> {
+    pub fn read(&self) -> Result<ReadGuard<T, A>, Blocked> {
         self.poll_read()?;
         Ok(ReadGuard::new(&self))
     }
 
-    pub fn try_write<'a>(&'a self) -> Result<DrainGuard<'a, T, A>, Blocked> {
+    pub fn write<'a>(&'a self) -> Result<DrainGuard<'a, T, A>, Blocked> {
         self.poll_write_mark().map(|ready| DrainGuard::new(&self, ready))
     }
 
@@ -65,34 +65,37 @@ where A: AtomicInt, A::Prim: AddSign {
     pub(crate) fn poll_read(&self) -> Result<(), Blocked> {
         let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         let current = self.atomic.load(Ordering::SeqCst);
-        let new = current + <A::Prim as Integer>::ONE;
-        if new < mask {
-            // hot path, if we assume writes and read saturation are rare
-            if self.atomic.compare_exchange_weak(
-                current, new, Ordering::SeqCst, Ordering::SeqCst
-            ).is_ok() {
-                Ok(())
+        if current < <A::Prim as Integer>::MAX { // avoid overflow on the next line
+            let new = current + <A::Prim as Integer>::ONE;
+            if new < mask {
+                // Hot path, if we assume writes and read saturation are
+                // rare. I would like to remove the CAS from here, but
+                // until we have saturating addition or more complex
+                // atomic ops, that doesn't seem possible.
+                if self.atomic.compare_exchange_weak(
+                    current, new, Ordering::SeqCst, Ordering::SeqCst
+                ).is_ok() {
+                    Ok(())
+                } else {
+                    Err(Blocked::LostRace)
+                }
+            } else if (current & mask) != mask {
+                Err(Blocked::Readers)
             } else {
-                Err(Blocked::LostRace)
+                Err(Blocked::Writer)
             }
-        } else if (current & mask) != mask {
-            Err(Blocked::Readers)
         } else {
             Err(Blocked::Writer)
         }
-        
     }
 
     pub(crate) fn poll_write_mark(&self) -> Result<bool, Blocked> {
         let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         let ret = self.atomic.fetch_or(mask, Ordering::SeqCst);
-        if ret == <A::Prim as Integer>::ZERO {
-            Ok(true) // We can take write access straight away
-        } else if (ret & mask) != mask {
-            Ok(false) // We can
-        } else {
-            Err(Blocked::Writer)
-        }
+
+        if ret == <A::Prim as Integer>::ZERO { Ok(true) } // No readers
+        else if (ret & mask) != mask { Ok(false) } // We'll have to wait for some readers
+        else { Err(Blocked::Writer) }
     }
 
     pub(crate) fn poll_write_upgrade(&self) -> bool {
@@ -133,7 +136,7 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
 
     /// Attempts to upgrade to a WriteGuard. If readers are still
     /// locking it, returns self so you can try again
-    pub fn try_upgrade(mut self) -> Result<WriteGuard<'a, T, A>, DrainGuard<'a, T, A>> {
+    pub fn upgrade(mut self) -> Result<WriteGuard<'a, T, A>, DrainGuard<'a, T, A>> {
         if self.ready {
             return self.lease.take().map(|lease| WriteGuard::new(lease)).ok_or(self);
         }
@@ -221,4 +224,53 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
     fn drop(&mut self) {
         self.lease.done_writing();
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    use std::sync::atomic::AtomicU8;
+
+    #[test]
+    fn solo_reading() {
+        let rw: RWLease<usize, AtomicUsize> = RWLease::new(123);
+        let r = rw.read().expect("read guard");
+        assert_eq!(*r, 123);
+    }
+
+    #[test]
+    fn read_with_writer() {
+        // maximum readers, writer bit
+        let rw: RWLease<u8, AtomicU8> = RWLease::new_with_state(128, 123);
+        assert_eq!(rw.read().unwrap_err(), Blocked::Writer);
+    }
+
+    #[test]
+    fn read_all_ones() {
+        // maximum readers, writer bit
+        let rw: RWLease<u8, AtomicU8> = RWLease::new_with_state(255, 123);
+        assert_eq!(rw.read().unwrap_err(), Blocked::Writer);
+    }
+
+    #[test]
+    fn read_with_max_readers() {
+        let rw: RWLease<u8, AtomicU8> = RWLease::new_with_state(127, 123);
+        assert_eq!(rw.read().unwrap_err(), Blocked::Readers);
+    }
+
+    #[test]
+    fn solo_writing() {
+        let rw: RWLease<usize> = RWLease::new(123);
+        {
+            let d = rw.write().expect("drain guard");
+            let mut w = d.upgrade().expect("write guard");
+            assert_eq!(*w, 123);
+            *w = 124;
+            assert_eq!(*w, 124);
+            assert_eq!(rw.read().unwrap_err(), Blocked::Writer);
+        }
+        let r = rw.read().expect("read guard");
+        assert_eq!(*r, 124);
+    }
+
 }

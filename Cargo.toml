@@ -1,23 +1,17 @@
 [package]
-name = "rw-lease"
+name = "rw_lease"
 version = "0.1.0"
 authors = ["James Laver <james.laver@gmail.com>"]
 edition = "2018"
 
 [features]
 async = ["atomic-waker", "event-listener"]
-default = ["async"]
+default = []
 
 [dependencies]
-atomic_prim_traits = "0.1"
-primitive_traits = "0.2"
-
-[dependencies.atomic-waker]
-version = "1.0"
-optional = true
-
-[dependencies.event-listener]
-version = "2.2"
-optional = true
+atomic_prim_traits = "0.2"
+primitive_traits   = "0.2"
+atomic-waker       = {optional = true, version = "1.0"}
+event-listener     = {optional = true, version = "2.2"}
 
 
