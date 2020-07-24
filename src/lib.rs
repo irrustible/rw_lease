@@ -12,7 +12,7 @@ use primitive_traits::*;
 // #[cfg(feature="async")]
 // pub use future::*;
 
-/// Can happen when we try to take a read lease.
+/// Can happen when we try to take a lease.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Blocked {
     /// There are too many readers, try again in a moment.
