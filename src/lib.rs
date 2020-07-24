@@ -4,10 +4,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use atomic_prim_traits::AtomicInt;
 use primitive_traits::*;
 
-#[cfg(feature="async")]
-mod future;
-#[cfg(feature="async")]
-pub use future::*;
+// These are currently broken. We'll just not incude them for now so
+// we can get the 0.1.0 release out
+//
+// #[cfg(feature="async")]
+// mod future;
+// #[cfg(feature="async")]
+// pub use future::*;
 
 /// Can happen when we try to take a read lease.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

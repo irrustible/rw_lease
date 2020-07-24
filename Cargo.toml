@@ -1,17 +1,25 @@
 [package]
 name = "rw_lease"
 version = "0.1.0"
+description = "Fast Reader-Writer lock with reader draining support. Based on a single (parameterisable) atomic usize."
+keywords = ["lock", "rwlock", "atomic"]
+categories = ["algorithms", "concurrency"] # asynchronous
+homepage = "https://github.com/irrustible/rw_lease"
+repository = "https://github.com/irrustible/rw_lease"
+documentation = "https://docs.rs/rw_lease"
 authors = ["James Laver <james.laver@gmail.com>"]
+license = "MPL-2.0"
 edition = "2018"
+readme = "README.md"
 
 [features]
-async = ["atomic-waker", "event-listener"]
+# async = ["atomic-waker", "event-listener"]
 default = []
 
 [dependencies]
 atomic_prim_traits = "0.2"
 primitive_traits   = "0.2"
-atomic-waker       = {optional = true, version = "1.0"}
-event-listener     = {optional = true, version = "2.2"}
+# atomic-waker       = {optional = true, version = "1.0"}
+# event-listener     = {optional = true, version = "2.2"}
 
 
