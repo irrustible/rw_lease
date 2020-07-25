@@ -5,7 +5,7 @@
 [![Documentation](https://docs.rs/rw_lease/badge.svg)](https://docs.rs/rw_lease)
 
 Fast Reader-Writer lock with reader draining support. Based on a
-single (parameterisable) atomic usize.
+single (parameterisable) atomic unsigned integer.
 
 Notes:
 

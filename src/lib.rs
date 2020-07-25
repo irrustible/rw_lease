@@ -31,8 +31,7 @@ pub enum Blocked {
 ///   * No looping
 /// * Writers wait for a lack of readers before assuming Write access.
 #[derive(Debug)]
-pub struct RWLease<T, A=AtomicUsize>
-where A: AtomicInt, A::Prim: AddSign {
+pub struct RWLease<T, A=AtomicUsize> {
     pub(crate) atomic: A,
     pub(crate) value: UnsafeCell<T>,
 }
