@@ -2,10 +2,12 @@
 
 extern crate test;
 
+use core::sync::atomic::spin_loop_hint;
+
 use std::sync::Arc;
-use std::sync::atomic::spin_loop_hint;
-use rw_lease::{Blocked, RWLease};
 use std::thread;
+
+use rw_lease::{Blocked, RWLease};
 
 use test::Bencher;
 
@@ -37,8 +39,13 @@ fn run(num_threads: usize, iter: usize) {
             for _ in 0..iter {
                 loop {
                     match m.read() {
-                        Ok(r) => { test::black_box(*r); break; }
-                        Err(Blocked::LostRace) => { spin_loop_hint(); }
+                        Ok(r) => {
+                            test::black_box(*r);
+                            break;
+                        }
+                        Err(Blocked::LostRace) => {
+                            spin_loop_hint();
+                        }
                         Err(_) => unreachable!(),
                     }
                 }

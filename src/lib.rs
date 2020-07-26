@@ -1,6 +1,9 @@
-use std::cell::UnsafeCell;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicUsize, Ordering};
+#![no_std]
+
+use core::cell::UnsafeCell;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use atomic_prim_traits::AtomicInt;
 use primitive_traits::*;
 
@@ -31,21 +34,29 @@ pub enum Blocked {
 ///   * No looping
 /// * Writers wait for a lack of readers before assuming Write access.
 #[derive(Debug)]
-pub struct RWLease<T, A=AtomicUsize> {
-    pub(crate) atomic: A,
-    pub(crate) value: UnsafeCell<T>,
+pub struct RWLease<T, A = AtomicUsize> {
+    atomic: A,
+    value: UnsafeCell<T>,
 }
 
 impl<T, A> RWLease<T, A>
-where A: AtomicInt, A::Prim: AddSign {
-
+where
+    A: AtomicInt,
+    A::Prim: AddSign,
+{
     pub fn new(value: T) -> RWLease<T, A> {
-        RWLease { atomic: A::default(), value: UnsafeCell::new(value) }
+        RWLease {
+            atomic: A::default(),
+            value: UnsafeCell::new(value),
+        }
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_state(state: A::Prim, value: T) -> RWLease<T, A> {
-        RWLease { atomic: AtomicInt::new(state), value: UnsafeCell::new(value) }
+    fn new_with_state(state: A::Prim, value: T) -> RWLease<T, A> {
+        RWLease {
+            atomic: AtomicInt::new(state),
+            value: UnsafeCell::new(value),
+        }
     }
 
     /// Attempt to take a read lease by CAS or explain why we couldn't.
@@ -54,33 +65,30 @@ where A: AtomicInt, A::Prim: AddSign {
         Ok(ReadGuard::new(&self))
     }
 
-    pub fn write<'a>(&'a self) -> Result<DrainGuard<'a, T, A>, Blocked> {
-        self.poll_write_mark().map(|ready| DrainGuard::new(&self, ready))
+    pub fn write(&self) -> Result<DrainGuard<T, A>, Blocked> {
+        self.poll_write_mark()
+            .map(|ready| DrainGuard::new(&self, ready))
     }
 
     pub fn into_inner(self) -> T {
         self.value.into_inner()
     }
 
-    // pub crate
-
-    pub(crate) fn poll_read(&self) -> Result<(), Blocked> {
+    fn poll_read(&self) -> Result<(), Blocked> {
         let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         let current = self.atomic.load(Ordering::SeqCst);
-        if current < <A::Prim as Integer>::MAX { // avoid overflow on the next line
+        if current < <A::Prim as Integer>::MAX {
+            // avoid overflow on the next line
             let new = current + <A::Prim as Integer>::ONE;
             if new < mask {
                 // Hot path, if we assume writes and read saturation are
                 // rare. I would like to remove the CAS from here, but
                 // until we have saturating addition or more complex
                 // atomic ops, that doesn't seem possible.
-                if self.atomic.compare_exchange_weak(
-                    current, new, Ordering::SeqCst, Ordering::SeqCst
-                ).is_ok() {
-                    Ok(())
-                } else {
-                    Err(Blocked::LostRace)
-                }
+                self.atomic
+                    .compare_exchange_weak(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                    .map(drop)
+                    .map_err(|_| Blocked::LostRace)
             } else if (current & mask) != mask {
                 Err(Blocked::Readers)
             } else {
@@ -91,30 +99,35 @@ where A: AtomicInt, A::Prim: AddSign {
         }
     }
 
-    pub(crate) fn poll_write_mark(&self) -> Result<bool, Blocked> {
+    fn poll_write_mark(&self) -> Result<bool, Blocked> {
         let mask = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         let ret = self.atomic.fetch_or(mask, Ordering::SeqCst);
 
-        if ret == <A::Prim as Integer>::ZERO { Ok(true) } // No readers
-        else if (ret & mask) != mask { Ok(false) } // We'll have to wait for some readers
-        else { Err(Blocked::Writer) }
+        if ret == <A::Prim as Integer>::ZERO {
+            Ok(true)
+        } else if (ret & mask) != mask {
+            // No readers
+            Ok(false)
+        } else {
+            // We'll have to wait for some readers
+            Err(Blocked::Writer)
+        }
     }
 
-    pub(crate) fn poll_write_upgrade(&self) -> bool {
+    fn poll_write_upgrade(&self) -> bool {
         let drained = <<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         drained == self.atomic.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn done_reading(&self) -> <A as AtomicInt>::Prim {
+    fn done_reading(&self) -> <A as AtomicInt>::Prim {
         let one = <<A as AtomicInt>::Prim as Integer>::ONE;
         self.atomic.fetch_sub(one, Ordering::SeqCst)
     }
 
-    pub(crate) fn done_writing(&self) {
+    fn done_writing(&self) {
         let mask = !<<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
         self.atomic.fetch_and(mask, Ordering::SeqCst);
     }
-
 }
 
 unsafe impl<T: Send> Send for RWLease<T> {}
@@ -124,90 +137,124 @@ unsafe impl<T: Sync> Sync for RWLease<T> {}
 /// leases so we can take a write lease.
 #[derive(Debug)]
 pub struct DrainGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
-    pub(crate) lease: Option<&'a RWLease<T, A>>,
-    pub(crate) ready: bool,
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
+    lease: &'a RWLease<T, A>,
+    ready: bool,
 }
 
 impl<'a, T, A> DrainGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
-
-    pub(crate) fn new(lease: &'a RWLease<T, A>, ready: bool) -> DrainGuard<'a, T, A> {
-        DrainGuard { lease: Some(lease), ready }
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
+    fn new(lease: &'a RWLease<T, A>, ready: bool) -> DrainGuard<'a, T, A> {
+        DrainGuard { lease, ready }
     }
 
     /// Attempts to upgrade to a WriteGuard. If readers are still
     /// locking it, returns self so you can try again
-    pub fn upgrade(mut self) -> Result<WriteGuard<'a, T, A>, DrainGuard<'a, T, A>> {
-        if self.ready {
-            return self.lease.take().map(|lease| WriteGuard::new(lease)).ok_or(self);
+    pub fn upgrade(self) -> Result<WriteGuard<'a, T, A>, Self> {
+        if self.ready || self.lease.poll_write_upgrade() {
+            let lease = self.lease;
+            // skip the drop handler
+            core::mem::forget(self);
+            Ok(WriteGuard::new(lease))
+        } else {
+            Err(self)
         }
-        if let Some(lease) = self.lease.take() {
-            if lease.poll_write_upgrade() {
-                return Ok(WriteGuard::new(lease));
-            }
-        }
-        Err(self)
     }
 }
 
 impl<'a, T, A> Drop for DrainGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            let mask = !<<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
-            lease.atomic.fetch_and(mask, Ordering::SeqCst);
-        }
+        let mask = !<<A::Prim as AddSign>::Signed as Integer>::MIN.drop_sign();
+        self.lease.atomic.fetch_and(mask, Ordering::SeqCst);
     }
 }
 
 /// This guard signifies read access. When it drops, it will release the read lock.
 #[derive(Debug)]
 pub struct ReadGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
-    pub(crate) lease: Option<&'a RWLease<T, A>>, 
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
+    lease: &'a RWLease<T, A>,
 }
 
 impl<'a, T, A: AtomicInt> ReadGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
-    pub(crate) fn new(lease: &'a RWLease<T, A>) -> ReadGuard<'a, T, A> {
-        ReadGuard { lease: Some(lease) }
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
+    fn new(lease: &'a RWLease<T, A>) -> ReadGuard<'a, T, A> {
+        ReadGuard { lease }
     }
 }
 
 impl<'a, T, A> Deref for ReadGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     type Target = T;
     fn deref(&self) -> &T {
-        unsafe { &*self.lease.unwrap().value.get() }
+        unsafe { &*self.lease.value.get() }
     }
 }
 
 impl<'a, T, A> Drop for ReadGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
-            lease.done_reading();
-        }
+        self.lease.done_reading();
     }
 }
 
 /// This guard signifies write access. When it drops, it will release the write lock.
 #[derive(Debug)]
 pub struct WriteGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
-    pub(crate) lease: &'a RWLease<T, A>,
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
+    lease: &'a RWLease<T, A>,
 }
 
 impl<'a, T, A> WriteGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     fn new(lease: &'a RWLease<T, A>) -> WriteGuard<'a, T, A> {
         WriteGuard { lease }
     }
 }
 
 impl<'a, T, A> Deref for WriteGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     type Target = T;
     fn deref(&self) -> &T {
         unsafe { &*self.lease.value.get() }
@@ -215,14 +262,22 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
 }
 
 impl<'a, T, A> DerefMut for WriteGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     fn deref_mut(&mut self) -> &mut T {
         unsafe { &mut *self.lease.value.get() }
     }
 }
 
 impl<'a, T, A> Drop for WriteGuard<'a, T, A>
-where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
+where
+    A: 'a + AtomicInt,
+    A::Prim: AddSign,
+    T: 'a,
+{
     fn drop(&mut self) {
         self.lease.done_writing();
     }
@@ -230,8 +285,9 @@ where A: 'a + AtomicInt, A::Prim: AddSign, T: 'a {
 
 #[cfg(test)]
 mod tests {
+    use core::sync::atomic::AtomicU8;
+
     use crate::*;
-    use std::sync::atomic::AtomicU8;
 
     #[test]
     fn solo_reading() {
@@ -274,5 +330,4 @@ mod tests {
         let r = rw.read().expect("read guard");
         assert_eq!(*r, 124);
     }
-
 }
